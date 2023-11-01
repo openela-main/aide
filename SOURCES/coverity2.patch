@@ -1,0 +1,31 @@
+diff --up ./src/compare_db.c ./src/compare_db.c
+--- ./src/compare_db.c
++++ ./src/compare_db.c
+@@ -438,7 +438,11 @@ snprintf(*values[0], l, "%s",s);
+     } else {
+         *values = malloc(1 * sizeof (char*));
+         if (DB_FTYPE&attr) {
+-            easy_string(get_file_type_string(line->perm))
++            char *file_type = get_file_type_string(line->perm);
++            if (!file_type) {
++                error(2,"%s: ", file_type);
++            }
++            easy_string(file_type)
+         } else if (DB_LINKNAME&attr) {
+             easy_string(line->linkname)
+         easy_number((DB_SIZE|DB_SIZEG),size,"%li")
+diff -up ./src/db_file.c ./src/db_file.c
+--- ./src/db_file.c
++++ ./src/db_file.c
+@@ -194,6 +194,10 @@ int db_file_read_spec(int db){
+ 
+   *db_order=(DB_FIELD*) malloc(1*sizeof(DB_FIELD));
+   
++  if (*db_order == NULL){
++    error(1,"malloc for *db_order failed in %s", __func__);
++  }
++
+   while ((i=db_scan())!=TNEWLINE){
+     switch (i) {
+       
+
