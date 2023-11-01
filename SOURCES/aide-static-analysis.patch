@@ -1,0 +1,171 @@
+Only in b: config.log
+diff --color -ru a/contrib/sshaide.sh b/contrib/sshaide.sh
+--- a/contrib/sshaide.sh	2016-07-25 22:56:55.000000000 +0200
++++ b/contrib/sshaide.sh	2021-05-20 11:11:24.112542472 +0200
+@@ -260,7 +260,7 @@
+     _randword=`grep -n . ${_wordlist} | grep "^${_linenum}:" | cut -d: -f2`
+  
+     # If $_randword has anything other than lower-case chars, try again
+-    (echo ${_randword} | LC_ALL=C grep '[^a-z]' 2>&1 >> /dev/null \
++    ({ echo ${_randword} | LC_ALL=C grep '[^a-z]' 2>&1; } >> /dev/null \
+             && gen_rand_word ) || \
+  
+     # Return the word
+diff --color -ru a/src/commandconf.c b/src/commandconf.c
+--- a/src/commandconf.c	2021-05-20 10:37:53.842382143 +0200
++++ b/src/commandconf.c	2021-05-25 14:16:43.278526146 +0200
+@@ -313,7 +313,7 @@
+       } else {
+ 	/* gzread returns 0 even if uncompressed bytes were read*/
+ 	error(240,"nread=%d,strlen(buf)=%lu,errno=%s,gzerr=%s\n",
+-              retval,(unsigned long)strnlen((char*)buf, max_size),
++              retval,(unsigned long)strnlen((char*)buf, retval),
+               strerror(errno),gzerror(*db_gzp,&err));
+ 	if(retval==0){
+ 	  retval=strnlen((char*)buf, max_size);
+@@ -836,6 +836,11 @@
+       }
+       break;
+     }
++    default: {
++      error(0,"Unsupported dbtype.\n");
++      free(u);
++      break;
++    }
+     }
+   }
+   free(val);
+@@ -900,7 +905,7 @@
+   } else {
+     error_init(u,0);
+   }
+-
++  free(u->value);
+   free(u);  
+ }
+ 
+diff --color -ru a/src/db_disk.c b/src/db_disk.c
+--- a/src/db_disk.c	2021-05-20 10:37:53.842382143 +0200
++++ b/src/db_disk.c	2021-05-20 12:37:00.081493364 +0200
+@@ -125,10 +125,10 @@
+ 
+ 	ret = (char *) malloc (len);
+ 	ret[0] = (char) 0;
+-	strncpy(ret, conf->root_prefix, conf->root_prefix_length+1);
+-	strncat (ret, r->path, len2);
++	strcpy(ret, conf->root_prefix);
++	strcat (ret, r->path);
+ 	if (r->path[len2 - 1] != '/') {
+-		strncat (ret, "/", 1);
++		strcat (ret, "/");
+ 	}
+ 	strcat (ret, s);
+ 	return ret;
+@@ -207,8 +207,8 @@
+ 	if (!root_handled) {
+ 		root_handled = 1;
+ 		fullname=malloc((conf->root_prefix_length+2)*sizeof(char));
+-		strncpy(fullname, conf->root_prefix, conf->root_prefix_length+1);
+-		strncat (fullname, "/", 1);
++		strcpy(fullname, conf->root_prefix);
++		strcat (fullname, "/");
+ 		if (!get_file_status(&fullname[conf->root_prefix_length], &fs)) {
+ 		add = check_rxtree (&fullname[conf->root_prefix_length], conf->tree, &attr, fs.st_mode);
+ 		error (240, "%s match=%d, tree=%p, attr=%llu\n", &fullname[conf->root_prefix_length], add,
+@@ -346,8 +346,8 @@
+ 				error (255, "r->childs %p, r->parent %p,r->checked %i\n",
+ 							 r->childs, r->parent, r->checked);
+ 				fullname=malloc((conf->root_prefix_length+strlen(r->path)+1)*sizeof(char));
+-				strncpy(fullname, conf->root_prefix, conf->root_prefix_length+1);
+-				strncat(fullname, r->path, strlen(r->path));
++				strcpy(fullname, conf->root_prefix);
++				strcat(fullname, r->path);
+ 				dirh=open_dir(fullname);
+ 				if (! dirh) {
+ 
+@@ -441,8 +441,8 @@
+ 
+ 
+ 	char* fullname=malloc((conf->root_prefix_length+2)*sizeof(char));
+-	strncpy(fullname, conf->root_prefix, conf->root_prefix_length+1);
+-	strncat (fullname, "/", 1);
++	strcpy(fullname, conf->root_prefix);
++	strcat (fullname, "/");
+ 	dirh=open_dir(fullname);
+ 	free(fullname);
+ 
+diff --color -ru a/src/error.c b/src/error.c
+--- a/src/error.c	2021-05-20 10:37:53.836382037 +0200
++++ b/src/error.c	2021-05-21 11:49:09.781313097 +0200
+@@ -125,7 +125,7 @@
+   fh=be_init(0,url,0);
+   if(fh!=NULL) {
+     conf->report_fd=list_append(conf->report_fd,(void*)fh);
+-    conf->report_url=list_append(conf->report_url,(void*)url);
++    conf->report_url=list_append(conf->report_url,(void*)strdup(url));
+     return RETOK;
+   }
+   
+diff --color -ru a/src/util.c b/src/util.c
+--- a/src/util.c	2021-05-20 10:37:53.843382160 +0200
++++ b/src/util.c	2021-05-25 11:04:39.507278771 +0200
+@@ -105,13 +105,15 @@
+       for(i=0;r[0]!='/'&&r[0]!='\0';r++,i++);
+       if(r[0]=='\0'){
+ 	error(0,"Invalid file-URL,no path after hostname: file:%s\n",t);
++        free(u);
++        free(val_copy);
+         free(hostname);
+ 	return NULL;
+       }
+       u->value=strdup(r);
+       r[0]='\0';
+       if(gethostname(hostname,MAXHOSTNAMELEN)==-1){
+-        strncpy(hostname,"localhost", 10);
++        strncpy(hostname,"localhost",MAXHOSTNAMELEN);
+       }
+ 
+       if( (strcmp(t,"localhost")==0)||(strcmp(t,hostname)==0)){
+@@ -119,6 +121,9 @@
+ 	break;
+       } else {
+ 	error(0,"Invalid file-URL, cannot use hostname other than localhost or %s: file:%s\n",hostname,u->value);
++        free(u->value);
++        free(u);
++        free(val_copy);
+ 	free(hostname);
+ 	return NULL;
+       }
+@@ -229,6 +234,10 @@
+   int i=0;
+   
+   pc=(char*)malloc(sizeof(char)*11);
++  if (!pc) {
++    error(0, "Memory allocation failed.\n");
++    return NULL;
++  }
+   for(i=0;i<10;i++){
+     pc[i]='-';
+   }
+@@ -369,14 +378,17 @@
+ 
+     if (path != NULL) {
+         if (path[0] == '~') {
+-            if((homedir=getenv("HOME")) != NULL) {
++            if ((homedir=getenv("HOME")) != NULL) {
+                 path_len = strlen(path+sizeof(char));
+                 homedir_len = strlen(homedir);
+                 full_len = homedir_len+path_len;
+                 full = malloc(sizeof(char) * (full_len+1));
+-                strncpy(full, homedir, homedir_len);
+-                strncpy(full+homedir_len, path+sizeof(char), path_len);
+-                full[full_len] = '\0';
++                if (!full) {
++                    error(0, "Memory allocation failed.\n");
++                    return path;
++                }
++                strcpy(full, homedir);
++                strcat(full, path+sizeof(char));
+                 free(path);
+                 /* Don't free(homedir); because it is not safe on some platforms */
+                 path = full;

@@ -1,0 +1,51 @@
+diff --color -ru a/configure.ac b/configure.ac
+--- a/configure.ac	2021-05-20 09:31:11.686987129 +0200
++++ b/configure.ac	2021-05-20 09:39:43.369967457 +0200
+@@ -784,11 +784,11 @@
+ 	[if test "x$withval" = "xmd5" ;then
+ 	   CONFIGHMACTYPE="MHASH_MD5"
+ 	else if test "x$withval" = "xsha1" ;then
+-	      CONFIGHMACTYPE="MHASH_SHA1"
++	   CONFIGHMACTYPE="MHASH_SHA1"
+ 	else if test "x$withval" = "xsha256" ;then
+-	      CONFIGHMACTYPE="MHASH_SHA256"
++	   CONFIGHMACTYPE="MHASH_SHA256"
+ 	else if test "x$withval" = "xsha512" ;then
+-	      CONFIGHMACTYPE="MHASH_SHA512"
++	   CONFIGHMACTYPE="MHASH_SHA512"
+         else 
+ 	   echo "Valid parameters for --with-confighmactype are md5, sha1, sha256 and sha512"
+ 	   exit 1
+@@ -799,7 +799,6 @@
+ 	AC_DEFINE_UNQUOTED(CONFIGHMACTYPE,$CONFIGHMACTYPE,[hash type for config file check])],
+ 	[
+ 	AC_DEFINE_UNQUOTED(CONFIGHMACTYPE,MHASH_MD5,[hash type for config file check])]
+-,
+ )
+ 
+ AC_ARG_WITH([confighmackey],
+@@ -846,18 +845,18 @@
+ 
+ AC_ARG_WITH([dbhmactype],
+ 	AC_HELP_STRING([--with-dbhmactype=TYPE],
+-		[Hash type to use for checking db. Valid values are md5 and sha1.]),
++		[Hash type to use for checking db. Valid values are md5, sha1, sha256 and sha512.]),
+ 	[if test "x$withval" = "xmd5" ;then
+ 	   DBHMACTYPE="MHASH_MD5"
+ 	else if test "x$withval" = "xsha1" ;then
+-	      DBHMACTYPE="MHASH_SHA1"
++	   DBHMACTYPE="MHASH_SHA1"
+ 	else if test "x$withval" = "xsha256" ;then
+-	      CONFIGHMACTYPE="MHASH_SHA256"
++	   DBHMACTYPE="MHASH_SHA256"
+ 	else if test "x$withval" = "xsha512" ;then
+-	      CONFIGHMACTYPE="MHASH_SHA512"
++	   DBHMACTYPE="MHASH_SHA512"
+         else 
+-	      echo "Valid parameters for --with-dbhmactype are md5, sha1, sha256 and sha512"
+-	      exit 1
++	   echo "Valid parameters for --with-dbhmactype are md5, sha1, sha256 and sha512"
++	   exit 1
+ 	fi
+ 	fi
+ 	fi
