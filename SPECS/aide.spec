@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.16
-Release:        100%{?dist}
+Release:        102%{?dist}
 URL:            http://sourceforge.net/projects/aide
 License:        GPLv2+
 
@@ -38,8 +38,9 @@ Patch6: coverity.patch
 Patch7: aide-0.16-crash-elf.patch
 Patch8: aide-configure.patch
 Patch9: aide-static-analysis.patch
-
 Patch10: aide-0.16-CVE-2021-45417.patch
+Patch11: aide-db-problem.patch
+Patch12: rootPrefix.patch
 
 %description
 AIDE (Advanced Intrusion Detection Environment) is a file integrity
@@ -86,6 +87,13 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 
 %changelog
+* Fri May 17 2024 Radovan Sroka <rsroka@redhat.com> - 0.16-102
+RHEL 9.5.0 ERRATUM
+- aide fails with "Not enough parameters in db:15384. Trying to continue." unexpectedly
+Resolves: RHEL-27606
+- AIDE fails when using root_prefix option
+Resolves: RHEL-28882
+
 * Mon Jan 24 2022 Radovan Sroka <rsroka@redhat.com> - 0.16-100
 - backport fix for CVE-2021-45417
   Resolves: rhbz#2041950
