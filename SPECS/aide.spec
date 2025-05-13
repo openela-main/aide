@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.16
-Release:        102%{?dist}
+Release:        103%{?dist}
 URL:            http://sourceforge.net/projects/aide
 License:        GPLv2+
 
@@ -87,6 +87,11 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 
 %changelog
+* Wed Jan 15 2025 Radovan Sroka <rsroka@redhat.com> - 0.16-103
+RHEL 9.6.0 ERRATUM
+- /boot/grub2/grubenv's timestamp is getting modified continuously due to "boot_success" implementation
+Resolves: RHEL-4331
+
 * Fri May 17 2024 Radovan Sroka <rsroka@redhat.com> - 0.16-102
 RHEL 9.5.0 ERRATUM
 - aide fails with "Not enough parameters in db:15384. Trying to continue." unexpectedly
