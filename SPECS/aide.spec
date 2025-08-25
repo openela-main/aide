@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.16
-Release:        103%{?dist}
+Release:        103%{?dist}.2
 URL:            http://sourceforge.net/projects/aide
 License:        GPLv2+
 
@@ -41,6 +41,7 @@ Patch9: aide-static-analysis.patch
 Patch10: aide-0.16-CVE-2021-45417.patch
 Patch11: aide-db-problem.patch
 Patch12: rootPrefix.patch
+Patch13: aide-0.16-CVE-2025-54389.patch
 
 %description
 AIDE (Advanced Intrusion Detection Environment) is a file integrity
@@ -87,6 +88,11 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 
 %changelog
+* Thu Aug 21 2025 Attila Lakatos <alakatos@redhat.com> - 0.16-103.2
+RHEL 9.6.Z ERRATUM
+- CVE-2025-54389 aide: improper output neutralization enables bypassing
+Resolves: RHEL-109910
+
 * Wed Jan 15 2025 Radovan Sroka <rsroka@redhat.com> - 0.16-103
 RHEL 9.6.0 ERRATUM
 - /boot/grub2/grubenv's timestamp is getting modified continuously due to "boot_success" implementation
