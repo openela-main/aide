@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.16
-Release:        14%{?dist}.1
+Release:        15%{?dist}.2
 URL:            http://sourceforge.net/projects/aide
 License:        GPLv2+
 Source0:        %{url}/files/aide/%{version}/%{name}-%{version}.tar.gz
@@ -37,8 +37,12 @@ Patch6: aide-0.16-crash-elf.patch
 # 1676487 - Null pointer dereference fix spotted by coverity
 Patch7: coverity2.patch
 
-# 2041956 - CVE-2021-45417 aide: heap-based buffer overflow on outputs larger than B64_BUF
+# 2041957 - CVE-2021-45417 aide: heap-based buffer overflow on outputs larger than B64_BUF
 Patch8: aide-0.16-CVE-2021-45417.patch
+
+# CVE-2025-54389 aide: improper output neutralization enables bypassing
+Patch9: aide-0.16-CVE-2025-54389.patch
+Patch10: aide-0.16-CVE-2025-54389-part2.patch
 
 %description
 AIDE (Advanced Intrusion Detection Environment) is a file integrity
@@ -84,9 +88,13 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 
 %changelog
-* Tue Jan 25 2022 Radovan Sroka <rsroka@redhat.com> - 0.16.14.1
+* Thu Aug 21 2025 Attila Lakatos <alakatos@redhat.com> - 0.16.15.2
+- CVE-2025-54389 aide: improper output neutralization enables bypassing
+  resolves: RHEL-109907
+
+* Tue Jan 25 2022 Radovan Sroka <rsroka@redhat.com> - 0.16.15
 - backported fix for CVE-2021-45417
-  resolves: rhbz#2041956
+  resolves: rhbz#2041957
 
 * Tue Jun 30 2020 Radovan Sroka <rsroka@redhat.com> = 0.16.14
 - strict require for libgcrypt
