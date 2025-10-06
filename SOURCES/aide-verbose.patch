@@ -1,0 +1,34 @@
+diff -up ./src/conf_eval.c.verbose ./src/conf_eval.c
+--- ./src/conf_eval.c.verbose	2023-04-01 18:25:38.000000000 +0200
++++ ./src/conf_eval.c	2024-05-15 00:08:41.040033220 +0200
+@@ -187,6 +187,7 @@ static void set_database_attr_option(DB_
+ static void eval_config_statement(config_option_statement statement, int linenumber, char *filename, char* linebuf) {
+     char *str;
+     bool b;
++    long num;
+     DB_ATTR_TYPE attr;
+     switch (statement.option) {
+         ATTRIBUTE_CONFIG_OPTION_CASE(REPORT_IGNORE_ADDED_ATTRS_OPTION, report_ignore_added_attrs)
+@@ -298,8 +299,20 @@ static void eval_config_statement(config
+             LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_CONFIG, "set 'config_version' option to '%s'", str)
+             break;
+         case VERBOSE_OPTION:
+-            log_msg(LOG_LEVEL_ERROR, "%s:%d: 'verbose' option is no longer supported, use 'log_level' and 'report_level' options instead (see man aide.conf for details) (line: '%s')", conf_filename, conf_linenumber, conf_linebuf);
+-            exit(INVALID_CONFIGURELINE_ERROR);
++            log_msg(LOG_LEVEL_CONFIG, "%s:%d: 'verbose' option is deprecated, use 'log_level' and 'report_level' options instead (see man aide.conf for details) (line: '%s')", conf_filename, conf_linenumber, conf_linebuf);
++            str = eval_string_expression(statement.e, linenumber, filename, linebuf);
++            num = strtol(str, NULL, 10);
++
++            if (num < 0 || num > 255) {
++                LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_ERROR, "invalid verbose level: '%s'", str);
++                exit(INVALID_CONFIGURELINE_ERROR);
++            }
++
++            if (num >= 10) {
++                set_log_level(LOG_LEVEL_DEBUG);
++            }
++
++            free(str);
+             break;
+         case LIMIT_CMDLINE_OPTION:
+             /* command-line options are ignored here */
