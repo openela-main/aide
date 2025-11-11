@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.16
-Release:        103%{?dist}.2
+Release:        105%{?dist}
 URL:            http://sourceforge.net/projects/aide
 License:        GPLv2+
 
@@ -88,10 +88,10 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 
 %changelog
-* Thu Aug 21 2025 Attila Lakatos <alakatos@redhat.com> - 0.16-103.2
-RHEL 9.6.Z ERRATUM
+* Wed Aug 20 2025 Attila Lakatos <alakatos@redhat.com> - 0.16-105
+RHEL 9.7 ERRATUM
 - CVE-2025-54389 aide: improper output neutralization enables bypassing
-Resolves: RHEL-109910
+Resolves: RHEL-109912
 
 * Wed Jan 15 2025 Radovan Sroka <rsroka@redhat.com> - 0.16-103
 RHEL 9.6.0 ERRATUM
