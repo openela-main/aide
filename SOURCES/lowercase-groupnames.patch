@@ -1,0 +1,21 @@
+diff -up aide-0.18.6/src/conf_lex.l.orig aide-0.18.6/src/conf_lex.l
+--- aide-0.18.6/src/conf_lex.l.orig	2025-10-14 08:06:03.148161714 +0200
++++ aide-0.18.6/src/conf_lex.l	2025-10-14 08:06:52.742286876 +0200
+@@ -5,8 +5,6 @@ G	[a-zA-Z0-9]
+ V	[a-zA-Z_]+[a-zA-Z0-9_]*
+ E	[\ ]*"="[\ ]*
+ 
+-O	[a-z_]
+-
+ %{
+ 
+ #define YYDEBUG 1
+@@ -483,7 +481,7 @@ LOG_LEVEL lex_log_level = LOG_LEVEL_CONF
+   return (CONFIGOPTION);
+ }
+ 
+-<CONFIG>({O})+ {
++<CONFIG>[a-z]+(_[a-z]+)+ {
+   log_msg(LOG_LEVEL_ERROR,"%s:%d: unknown config option: '%s' (line: '%s')", conf_filename, conf_linenumber, conftext, conf_linebuf);
+   exit(INVALID_CONFIGURELINE_ERROR);
+ }
