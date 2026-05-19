@@ -1,21 +1,26 @@
 Summary:        Intrusion detection environment
 Name:           aide
-Version:        0.16
-Release:        105%{?dist}
-URL:            http://sourceforge.net/projects/aide
+Version:        0.19.2
+Release:        5%{?dist}
+URL:            https://github.com/aide/aide
 License:        GPLv2+
 
 
-Source0:        %{url}/files/aide/%{version}/%{name}-%{version}.tar.gz
-Source1:        aide.conf
-Source2:        README.quickstart
-Source3:        aide.logrotate
+Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
+Source1:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz.asc
+# gpg2 --recv-keys 2BBBD30FAAB29B3253BCFBA6F6947DAB68E7B931
+# gpg2 --export --export-options export-minimal 2BBBD30FAAB29B3253BCFBA6F6947DAB68E7B931 >gpgkey-aide.gpg
+Source2:        gpgkey-aide.gpg
+Source3:        aide.conf
+Source4:        README.quickstart
+Source5:        aide.logrotate
+Source6:        aide-tmpfiles.conf
 
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  bison flex
 BuildRequires:  pcre-devel
-BuildRequires:  libgpg-error-devel libgcrypt-devel
+BuildRequires:  libgpg-error-devel nettle-devel
 BuildRequires:  zlib-devel
 BuildRequires:  libcurl-devel
 BuildRequires:  libacl-devel
@@ -23,61 +28,48 @@ BuildRequires:  pkgconfig(libselinux)
 BuildRequires:  libattr-devel
 BuildRequires:  e2fsprogs-devel
 BuildRequires:  audit-libs-devel
-BuildRequires:  autoconf automake libtool
-
-# Customize the database file location in the man page.
-Patch1: aide-0.16rc1-man.patch
-# fix aide in FIPS mode
-Patch2: aide-0.16b1-fipsfix.patch
-# Bug 1674637 - aide: FTBFS in Fedora rawhide/f30
-Patch3: aide-0.16-Use-LDADD-for-adding-curl-library-to-the-linker-comm.patch
-
-Patch4: aide-0.15-syslog-format.patch
-Patch5: aide-0.16-crypto-disable-haval-and-others.patch
-Patch6: coverity.patch
-Patch7: aide-0.16-crash-elf.patch
-Patch8: aide-configure.patch
-Patch9: aide-static-analysis.patch
-Patch10: aide-0.16-CVE-2021-45417.patch
-Patch11: aide-db-problem.patch
-Patch12: rootPrefix.patch
-Patch13: aide-0.16-CVE-2025-54389.patch
+BuildRequires:  autoconf automake libtool autoconf-archive
+BuildRequires:  systemd-rpm-macros
+# For verifying signatures
+BuildRequires:  gnupg2
 
 %description
 AIDE (Advanced Intrusion Detection Environment) is a file integrity
 checker and intrusion detection program.
 
 %prep
+%{gpgverify} --keyring='%{SOURCE2}' --signature='%{SOURCE1}' --data='%{SOURCE0}'
 %autosetup -p1
-cp -a %{S:2} .
+cp -a %{SOURCE4} .
 
 %build
 autoreconf -ivf
 %configure  \
   --disable-static \
   --with-config_file=%{_sysconfdir}/aide.conf \
-  --with-gcrypt \
+  --without-gcrypt \
+  --with-nettle \
   --with-zlib \
   --with-curl \
   --with-posix-acl \
   --with-selinux \
   --with-xattr \
   --with-e2fsattrs \
-  --with-audit \
-  --with-confighmactype=sha512 \
-  --with-dbhmactype=sha512
+  --with-audit
 %make_build
 
 %install
 %make_install bindir=%{_sbindir}
-install -Dpm0644 -t %{buildroot}%{_sysconfdir} %{S:1}
-install -Dpm0644 %{S:3} %{buildroot}%{_sysconfdir}/logrotate.d/aide
+install -Dpm0644 -t %{buildroot}%{_sysconfdir} %{SOURCE3}
+install -Dpm0644 %{SOURCE5} %{buildroot}%{_sysconfdir}/logrotate.d/aide
 mkdir -p %{buildroot}%{_localstatedir}/log/aide
 mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
+# Install tmpfiles config
+install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/aide.conf
 
 %files
 %license COPYING
-%doc AUTHORS ChangeLog NEWS README doc/manual.html contrib/
+%doc AUTHORS ChangeLog NEWS README
 %doc README.quickstart
 %{_sbindir}/aide
 %{_mandir}/man1/*.1*
@@ -86,8 +78,36 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %config(noreplace) %{_sysconfdir}/logrotate.d/aide
 %dir %attr(0700,root,root) %{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
+%{_tmpfilesdir}/aide.conf
 
 %changelog
+* Wed Oct 15 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-5
+- Adjust default config to avoid false positives in /etc
+Resolves: RHEL-83776
+
+* Thu Oct 09 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-4
+- /boot/grub2/grubenv is excluded from check due to boot_success implementation
+Resolves: RHEL-83776
+
+* Tue Sep 30 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-3
+- Do not monitor link count in /var/log/journal
+Resolves: RHEL-83776
+
+* Thu Sep 25 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-2
+RHEL 9.8.0 ERRATUM
+- Modernize config file
+Resolves: RHEL-83776
+
+* Tue Sep 16 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-1
+RHEL 9.8.0 ERRATUM
+- rebase to 0.19.2
+Resolves: RHEL-110573
+- Switch to libnettle for hashing
+- prevent aide from crashing if database is a HTTPS URL
+Resolves: RHEL-76014
+- prevent aide from exiting if a file is truncated during check
+Resolves: RHEL-1569
+
 * Wed Aug 20 2025 Attila Lakatos <alakatos@redhat.com> - 0.16-105
 RHEL 9.7 ERRATUM
 - CVE-2025-54389 aide: improper output neutralization enables bypassing
