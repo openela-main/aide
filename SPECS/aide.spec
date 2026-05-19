@@ -1,19 +1,24 @@
 Summary:        Intrusion detection environment
 Name:           aide
-Version:        0.18.6
-Release:        8%{?dist}.2
-URL:            http://sourceforge.net/projects/aide
+Version:        0.19.2
+Release:        4%{?dist}
+URL:            https://github.com/aide/aide
 License:        GPL-2.0-or-later
-Source0:        %{url}/files/aide/%{version}/%{name}-%{version}.tar.gz
-Source1:        aide.conf
-Source2:        README.quickstart
-Source3:        aide.logrotate
+Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
+Source1:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz.asc
+# gpg2 --recv-keys 2BBBD30FAAB29B3253BCFBA6F6947DAB68E7B931
+# gpg2 --export --export-options export-minimal 2BBBD30FAAB29B3253BCFBA6F6947DAB68E7B931 >gpgkey-aide.gpg
+Source2:        gpgkey-aide.gpg
+Source3:        aide.conf
+Source4:        README.quickstart
+Source5:        aide.logrotate
+Source6:        aide-tmpfiles.conf
 
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  bison flex
 BuildRequires:  pcre2-devel
-BuildRequires:  libgpg-error-devel gnutls-devel
+BuildRequires:  libgpg-error-devel nettle-devel
 BuildRequires:  zlib-devel
 BuildRequires:  libcurl-devel
 BuildRequires:  libacl-devel
@@ -22,36 +27,26 @@ BuildRequires:  libattr-devel
 BuildRequires:  e2fsprogs-devel
 BuildRequires:  audit-libs-devel
 BuildRequires:  autoconf autoconf-archive
-BuildRequires:  automake libtool
-
-Patch1: aide-verbose.patch
-Patch2: gnutls.patch
-Patch3: escape-control-chars-CVE-2025-54389.patch
-Patch4: lowercase-groupnames.patch
-
+BuildRequires:  automake libtool systemd-rpm-macros
+# For verifying signatures
+BuildRequires:  gnupg2
 
 %description
 AIDE (Advanced Intrusion Detection Environment) is a file integrity
 checker and intrusion detection program.
 
 %prep
-
-%setup
-#%%autosetup -p1
-cp -a %{S:2} .
-
-%patch -P 1 -p1 -b .verbose
-%patch -P 2 -p1 -b .gnutls
-%patch -P 3 -p1 -b .CVE-2025-54389
-%patch -P 4 -p1 -b .lowercase-groupnames
+%{gpgverify} --keyring='%{SOURCE2}' --signature='%{SOURCE1}' --data='%{SOURCE0}'
+%autosetup -p1
+cp -a %{SOURCE4} .
 
 %build
 autoreconf -ivf
 %configure  \
   --disable-static \
   --with-config_file=%{_sysconfdir}/aide.conf \
-  --with-gnutls \
   --without-gcrypt \
+  --with-nettle \
   --with-zlib \
   --with-curl \
   --with-posix-acl \
@@ -63,14 +58,16 @@ autoreconf -ivf
 
 %install
 %make_install bindir=%{_sbindir}
-install -Dpm0644 -t %{buildroot}%{_sysconfdir} %{S:1}
-install -Dpm0644 %{S:3} %{buildroot}%{_sysconfdir}/logrotate.d/aide
+install -Dpm0644 -t %{buildroot}%{_sysconfdir} %{SOURCE3}
+install -Dpm0644 %{SOURCE5} %{buildroot}%{_sysconfdir}/logrotate.d/aide
 mkdir -p %{buildroot}%{_localstatedir}/log/aide
 mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
+# Install tmpfiles config
+install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/aide.conf
 
 %files
 %license COPYING
-%doc AUTHORS ChangeLog NEWS README contrib/
+%doc AUTHORS ChangeLog NEWS README
 %doc README.quickstart
 %{_sbindir}/aide
 %{_mandir}/man1/*.1*
@@ -79,21 +76,36 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 %config(noreplace) %{_sysconfdir}/logrotate.d/aide
 %dir %attr(0700,root,root) %{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
+%{_tmpfilesdir}/aide.conf
 
 %changelog
-* Tue Oct 14 2025 Attila Lakatos <alakatos@redhat.com> - 0.18.6-8.2
-- RHEL 10.1.Z ERRATUM
-- Fix lowercase group name definition
-Resolves: RHEL-119647
+* Wed Oct 15 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-4
+- Adjust default config to avoid false positives in /etc
+Resolves: RHEL-39970
 
-* Tue Aug 19 2025 Attila Lakatos <alakatos@redhat.com> - 0.18.6-8.1
-RHEL 10.1 ERRATUM
-- CVE-2025-54389 aide: improper output neutralization enables bypassing
-Resolves: RHEL-108928
+* Thu Oct 09 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-3
+- /boot/grub2/grubenv is excluded from check due to boot_success implementation
+- Do not monitor link count in /var/log/journal
+Resolves: RHEL-39970
+
+* Thu Sep 25 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-2
+- Modernize aide config file
+Resolves: RHEL-39970
+- No path reference ends with '/'
+Resolves: RHEL-39959
+
+* Tue Aug 05 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-1
+- rebase to 0.19.2
+Resolves: RHEL-110572
+- exclude directory but include subitems
+Resolves: RHEL-1382
+- prevent aide from exiting if a file is truncated during check
+Resolves: RHEL-1383
+- Switch to libnettle for hashing
+Resolves: RHEL-59170
 
 * Wed Jan 29 2025 Radovan Sroka <rsroka@redhat.com> - 0.18.6-8
 RHEL 10.0 ERRATUM
-- /boot/grub2/grubenv's timestamp is getting modified continuously due to "boot_success" implementation
 Resolves: RHEL-4320
 
 * Tue Oct 29 2024 Troy Dawson <tdawson@redhat.com> - 0.18.6-7
