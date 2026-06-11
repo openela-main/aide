@@ -1,0 +1,657 @@
+From f3e62eb87e0a0e9c6fd43c933670447c8ab0517a Mon Sep 17 00:00:00 2001
+From: Cropi <alakatos@redhat.com>
+Date: Thu, 28 May 2026 14:50:34 +0200
+Subject: [PATCH] conf, report: add syslog_format config option
+
+Re-implement the syslog_format option that existed as a Red Hat downstream
+patch against aide 0.16 but was dropped during the rebase to 0.19.2.
+
+Customers upgrading from RHEL 9.7 (aide 0.16) to RHEL 9.8 (aide 0.19.2)
+received a fatal parse error on startup if their aide.conf contained
+'syslog_format = true' (RHEL-178317).
+
+The option is implemented as a new REPORT_FORMAT_SYSLOG value in the
+existing report format module system, rather than as a standalone boolean,
+which fits the 0.19.2 architecture cleanly.
+
+syslog_format = yes/true  is equivalent to  report_format = syslog
+Both spellings are accepted; last-write wins.
+
+When active, the standard multi-line report is replaced with a compact
+semicolon-delimited format where every file event is one line:
+
+  AIDE found differences between database and filesystem!!
+  summary;total_number_of_files=N;added_files=N;removed_files=N;changed_files=N
+  file=/usr/sbin/sshd;Mtime_old=...;Mtime_new=...;SHA256_old=...;SHA256_new=...
+  dir=/etc/cron.d; added
+  file=/usr/bin/old; removed
+
+Each line is emitted with a single report_printf() call so that when used
+with report_url=syslog:<FACILITY> exactly one syslog message is produced
+per file event.
+
+The module implements its own unconditional tree walker (not gated on
+report_level) so added and removed entries are always included, matching
+the original patch behaviour. ACL and xattr values are formatted directly
+from db_line fields rather than through get_attribute_values() to avoid
+embedded newlines breaking the single-line invariant. The original patch's
+uninitialized 'char *A' in the ACL path is fixed.
+
+Signed-off-by: Cropi <alakatos@redhat.com>
+---
+ Makefile.am             |   1 +
+ doc/aide.conf.5         |  28 ++++
+ include/conf_ast.h      |   1 +
+ include/db_config.h     |   1 +
+ include/report.h        |   3 +
+ include/report_syslog.h |  28 ++++
+ src/aide.c              |   1 +
+ src/conf_ast.c          |   1 +
+ src/conf_eval.c         |   8 +
+ src/conf_lex.l          |   7 +
+ src/report.c            |  16 +-
+ src/report_syslog.c     | 338 ++++++++++++++++++++++++++++++++++++++++
+ 12 files changed, 432 insertions(+), 1 deletion(-)
+ create mode 100644 include/report_syslog.h
+ create mode 100644 src/report_syslog.c
+
+diff --git a/Makefile.am b/Makefile.am
+index f78a96c..356b983 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -31,6 +31,7 @@ aide_SOURCES = src/aide.c include/aide.h \
+ 	include/report.h src/report.c \
+ 	include/report_plain.h src/report_plain.c \
+ 	include/report_json.h src/report_json.c \
++	include/report_syslog.h src/report_syslog.c \
+ 	include/conf_ast.h src/conf_ast.c \
+ 	include/conf_eval.h src/conf_eval.c \
+ 	include/conf_lex.h src/conf_lex.l  \
+diff --git a/doc/aide.conf.5 b/doc/aide.conf.5
+index 4ad9f3e..5366be4 100644
+--- a/doc/aide.conf.5
++++ b/doc/aide.conf.5
+@@ -266,6 +266,34 @@ The report format to use. The available report formats are as follows:
+ 
+ \fBjson\fP: Print report in json machine-readable format.
+ .RE
++.IP "syslog_format (type: bool, default: \fBno\fR)"
++Valid values are \fByes\fR, \fBtrue\fR, \fBno\fR and \fBfalse\fR.
++
++When enabled, the standard multi-line report is replaced with a compact
++semicolon-delimited format where every file event is emitted as a single line.
++This ensures that when used with \fBreport_url=syslog:\fILOG_FACILITY\fR, exactly
++one syslog message is produced per changed, added, or removed file.
++
++Output starts with a header line when differences are found:
++.nf
++AIDE found differences between database and filesystem!!
++.fi
++Followed by a summary line:
++.nf
++summary;total_number_of_files=\fIN\fP;added_files=\fIN\fP;removed_files=\fIN\fP;changed_files=\fIN\fP
++.fi
++Then one line per changed, added, or removed entry:
++.nf
++file=/usr/sbin/sshd;Mtime_old=...;Mtime_new=...;SHA256_old=...;SHA256_new=...
++dir=/etc/cron.d; added
++file=/usr/bin/old; removed
++.fi
++
++The maximum size of a single syslog message depends on the syslog daemon
++(typically 1\(en8\ KB). Lines exceeding this limit will be silently truncated
++by the syslog daemon. This is not controlled by AIDE.
++
++The \fBreport_summarize_changes\fR option has no effect in this format.
+ 
+ .IP "report_base16 (type: bool, default: \fBfalse\fR, added in AIDE v0.17)"
+ Base16 encode the checksums in the report. The default is to
+diff --git a/include/conf_ast.h b/include/conf_ast.h
+index 8892a05..424f734 100644
+--- a/include/conf_ast.h
++++ b/include/conf_ast.h
+@@ -53,6 +53,7 @@ typedef enum config_option {
+     REPORT_FORMAT_OPTION,
+     LIMIT_CMDLINE_OPTION,
+     NUM_WORKERS,
++    SYSLOG_FORMAT_OPTION,
+ } config_option;
+ 
+ typedef struct {
+diff --git a/include/db_config.h b/include/db_config.h
+index 4173a4b..363631e 100644
+--- a/include/db_config.h
++++ b/include/db_config.h
+@@ -133,6 +133,7 @@ typedef struct db_config {
+   int report_detailed_init;
+   int report_base16;
+   int report_quiet;
++  int syslog_format;
+   bool report_append;
+ 
+   DB_ATTR_TYPE report_ignore_added_attrs;
+diff --git a/include/report.h b/include/report.h
+index 2ec3539..b2efa55 100644
+--- a/include/report.h
++++ b/include/report.h
+@@ -48,6 +48,7 @@ typedef enum {
+     REPORT_FORMAT_UNKNOWN = 0,
+     REPORT_FORMAT_PLAIN = 1,
+     REPORT_FORMAT_JSON = 2,
++    REPORT_FORMAT_SYSLOG = 3,
+ } REPORT_FORMAT;
+ 
+ extern const ATTRIBUTE report_attrs_order[];
+@@ -138,6 +139,8 @@ typedef struct report_format_module {
+     void (*print_report_summary)(report_t*);
+ } report_format_module;
+ 
++DB_ATTR_TYPE get_report_attributes(seltree*, report_t*);
++
+ char* get_file_type_string(mode_t);
+ char* get_summarize_changes_string(report_t*, seltree*);
+ char* get_summary_string(report_t*);
+diff --git a/include/report_syslog.h b/include/report_syslog.h
+new file mode 100644
+index 0000000..4da9ae4
+--- /dev/null
++++ b/include/report_syslog.h
+@@ -0,0 +1,28 @@
++/*
++ * AIDE (Advanced Intrusion Detection Environment)
++ *
++ * Copyright (C) 2025 Hannes von Haugwitz
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#ifndef _REPORT_SYSLOG_H_INCLUDED
++#define _REPORT_SYSLOG_H_INCLUDED
++
++#include "report.h"
++
++extern report_format_module report_module_syslog;
++
++#endif
+diff --git a/src/aide.c b/src/aide.c
+index 6f728a9..f9a9cd4 100644
+--- a/src/aide.c
++++ b/src/aide.c
+@@ -439,6 +439,7 @@ static void setdefaults_before_config(void)
+   conf->report_detailed_init=0;
+   conf->report_base16=0;
+   conf->report_quiet=0;
++  conf->syslog_format=0;
+   conf->report_append=false;
+   conf->report_ignore_added_attrs = 0;
+   conf->report_ignore_removed_attrs = 0;
+diff --git a/src/conf_ast.c b/src/conf_ast.c
+index 366bc3f..7b66aed 100644
+--- a/src/conf_ast.c
++++ b/src/conf_ast.c
+@@ -58,6 +58,7 @@ config_option_t config_options[] = {
+     { REPORT_FORMAT_OPTION,                     NULL,                           NULL },
+     { LIMIT_CMDLINE_OPTION,                     "limit",                        "Limit" },
+     { NUM_WORKERS,                              NULL,                           NULL },
++    { SYSLOG_FORMAT_OPTION,                     NULL,                           NULL },
+ };
+ 
+ static ast* new_ast_node(void) {
+diff --git a/src/conf_eval.c b/src/conf_eval.c
+index 5774ce6..bb39610 100644
+--- a/src/conf_eval.c
++++ b/src/conf_eval.c
+@@ -264,6 +264,9 @@ static void eval_config_statement(config_option_statement statement, int linenum
+             REPORT_FORMAT report_format = get_report_format(str);
+             if (report_format != REPORT_FORMAT_UNKNOWN) {
+                 conf->report_format = report_format;
++                for (list *l = conf->report_urls; l; l = l->next) {
++                    ((report_t *)l->data)->format = report_format;
++                }
+                 LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_CONFIG, "set 'report_format' option to '%s' (raw: %d)", str, report_format)
+             } else {
+                 LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_ERROR, "invalid report format: '%s'", str);
+@@ -315,6 +318,11 @@ static void eval_config_statement(config_option_statement statement, int linenum
+                     LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_NOTICE, "'num_workers' option already set (ignore new value '%s')", str)
+             }
+             break;
++        case SYSLOG_FORMAT_OPTION:
++            b = string_expression_to_bool(statement.e, linenumber, filename, linebuf);
++            conf->syslog_format = b;
++            LOG_CONFIG_FORMAT_LINE(LOG_LEVEL_CONFIG, "set 'syslog_format' to '%s'", btoa(b))
++            break;
+     }
+ }
+ 
+diff --git a/src/conf_lex.l b/src/conf_lex.l
+index 877a125..1a9654f 100644
+--- a/src/conf_lex.l
++++ b/src/conf_lex.l
+@@ -362,6 +362,13 @@ LOG_LEVEL lex_log_level = LOG_LEVEL_DEBUG;
+   BEGIN (STRINGEQHUNT);
+   return (CONFIGOPTION);
+ }
++<CONFIG>"syslog_format" {
++  LOG_LEX_TOKEN(lex_log_level, CONFIGOPTION (SYSLOG_FORMAT_OPTION), conftext)
++  conflval.option = SYSLOG_FORMAT_OPTION;
++  BEGIN (STRINGEQHUNT);
++  return (CONFIGOPTION);
++}
++
+ 
+ <CONFIG>"report_level" {
+   LOG_LEX_TOKEN(lex_log_level, CONFIGOPTION (REPORT_LEVEL_OPTION), conftext)
+diff --git a/src/report.c b/src/report.c
+index 9e4d0d0..f87754c 100644
+--- a/src/report.c
++++ b/src/report.c
+@@ -59,6 +59,7 @@
+ #include "report.h"
+ #include "report_plain.h"
+ #include "report_json.h"
++#include "report_syslog.h"
+ /*for locale support*/
+ #include "locale-aide.h"
+ /*for locale support*/
+@@ -146,6 +147,7 @@ struct report_format {
+ static struct report_format report_format_array[] = {
+  { REPORT_FORMAT_PLAIN, "plain" },
+  { REPORT_FORMAT_JSON, "json" },
++ { REPORT_FORMAT_SYSLOG, "syslog" },
+  { REPORT_FORMAT_UNKNOWN, NULL }
+ };
+ 
+@@ -509,6 +511,15 @@ bool init_report_urls(void) {
+         }
+     }
+ 
++    }
++    /* syslog_format is a downstream-only option that must win over report_format
++     * regardless of declaration order in the config file.  Enforce it here,
++     * after the entire config AST has been evaluated, so no subsequent
++     * report_format setting can accidentally override the user's intent. */
++    if (conf->syslog_format) {
++        for (l=conf->report_urls; l; l=l->next) {
++            ((report_t *)l->data)->format = REPORT_FORMAT_SYSLOG;
++        }
+     }
+     return true;
+ }
+@@ -677,7 +688,7 @@ char* get_summarize_changes_string(report_t* report, seltree* node) {
+ 
+ 
+ 
+-static DB_ATTR_TYPE get_report_attributes(seltree* node, report_t *report) {
++DB_ATTR_TYPE get_report_attributes(seltree* node, report_t *report) {
+     db_line* oline = node->old_data;
+     db_line* nline = node->new_data;
+     DB_ATTR_TYPE attrs = node->changed_attrs;
+@@ -966,6 +977,9 @@ int gen_report(seltree* node) {
+             case REPORT_FORMAT_JSON:
+                 print_report(report, node, report_module_json);
+                 break;
++            case REPORT_FORMAT_SYSLOG:
++                print_report(report, node, report_module_syslog);
++                break;
+             case REPORT_FORMAT_UNKNOWN:
+                 /* skip unknown report format */
+                 break;
+diff --git a/src/report_syslog.c b/src/report_syslog.c
+new file mode 100644
+index 0000000..920e927
+--- /dev/null
++++ b/src/report_syslog.c
+@@ -0,0 +1,338 @@
++/*
++ * AIDE (Advanced Intrusion Detection Environment)
++ *
++ * Copyright (C) 2025 Hannes von Haugwitz
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#include "config.h"
++#include "aide.h"
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include "attributes.h"
++#include "base64.h"
++#include "db.h"
++#include "db_line.h"
++#include "hashsum.h"
++#include "report.h"
++#include "report_syslog.h"
++#include "seltree.h"
++#include "seltree_struct.h"
++#include "tree.h"
++#include "util.h"
++
++/* Returns the compact syslog file-type prefix, or NULL when mode is unknown
++ * (mode & S_IFMT == 0), in which case callers omit the "type=" prefix. */
++static const char *get_syslog_type_prefix(mode_t mode) {
++    switch (mode & S_IFMT) {
++        case S_IFREG:  return "file";
++        case S_IFDIR:  return "dir";
++        case S_IFLNK:  return "link";
++        case S_IFBLK:  return "blockd";
++        case S_IFCHR:  return "chard";
++#ifdef S_IFIFO
++        case S_IFIFO:  return "fifo";
++#endif
++#ifdef S_IFSOCK
++        case S_IFSOCK: return "socket";
++#endif
++        case 0:        return NULL;
++        default:       return "unknown";
++    }
++}
++
++/* Returns the key name for attribute a.  attr_sizeg is the only exception:
++ * its details_string is "Size (>)" which contains '>', so we substitute
++ * "Size" to match the original patch's explicit details_string[] change. */
++static const char *get_attr_key(ATTRIBUTE a) {
++    if (a == attr_sizeg) {
++        return "Size";
++    }
++    return attributes[a].details_string;
++}
++
++#ifdef WITH_XATTR
++
++#define SYSLOG_PRINTABLE_XATTR_VALS \
++    "0123456789" \
++    "abcdefghijklmnopqrstuvwxyz" \
++    "ABCDEFGHIJKLMNOPQRSTUVWXYZ" \
++    ".-_:;,[]{}<>()!@#$%^&*|\\/?~"
++
++/* Appends one side's xattr values to stream in compact syslog format.
++ * Format: ;XAttrs_<side>=|[1]key=val|[2]key=val| */
++static void build_xattrs_compact(FILE *stream, db_line *line, const char *side) {
++    xattrs_type *xattrs = line ? line->xattrs : NULL;
++
++    if (!xattrs || xattrs->num == 0) {
++        fprintf(stream, ";XAttrs_%s=|num=0|", side);
++        return;
++    }
++
++    fprintf(stream, ";XAttrs_%s=|num=%zu|", side, xattrs->num);
++
++    for (size_t i = 0; i < xattrs->num; i++) {
++        const char *key = xattrs->ents[i].key;
++        const char *val = (const char *)xattrs->ents[i].val;
++        size_t vsz = xattrs->ents[i].vsz;
++
++        /* Check printability (replicates xstrnspn logic from report.c). */
++        size_t plen = 0;
++        while (plen < vsz && strchr(SYSLOG_PRINTABLE_XATTR_VALS, val[plen]))
++            plen++;
++        bool printable = (plen == vsz) || (plen == vsz - 1 && val[plen] == '\0');
++
++        if (printable) {
++            fprintf(stream, "[%zu]%s=%s|", i + 1, key, val);
++        } else {
++            char *b64 = encode_base64((byte *)xattrs->ents[i].val, vsz);
++            fprintf(stream, "[%zu]%s<=>%s|", i + 1, key, b64 ? b64 : "");
++            free(b64);
++        }
++    }
++}
++#endif /* WITH_XATTR */
++
++#ifdef WITH_POSIX_ACL
++/* Appends one side's ACL to stream in compact syslog format.
++ * Format: ;ACL_<side>=A:<acl_a_newlines_as_spaces>|D:<acl_d_newlines_as_spaces>
++ *
++ * Both A and D are initialized to "<NONE>" before the conditionals, fixing
++ * the uninitialized-pointer bug in the original 0.16 patch. */
++static void build_acl_compact(FILE *stream, db_line *line, const char *side) {
++    acl_type *acl = line ? line->acl : NULL;
++
++    const char *A = "<NONE>";
++    const char *D = "<NONE>";
++    if (acl) {
++        if (acl->acl_a) { A = acl->acl_a; }
++        if (acl->acl_d) { D = acl->acl_d; }
++    }
++
++    /* Write A component, replacing newlines with spaces. */
++    fprintf(stream, ";ACL_%s=A:", side);
++    for (const char *p = A; *p; p++) {
++        fputc(*p == '\n' ? ' ' : *p, stream);
++    }
++
++    /* Write D component, replacing newlines with spaces. */
++    fprintf(stream, "|D:");
++    for (const char *p = D; *p; p++) {
++        fputc(*p == '\n' ? ' ' : *p, stream);
++    }
++}
++#endif /* WITH_POSIX_ACL */
++
++/* Assembles a complete syslog line for one file event into *out.
++ *
++ * Invariant: this function never calls report_printf(). The caller emits
++ * the result with exactly one report_printf() call to avoid fragmenting
++ * syslog messages (each report_printf to url_syslog calls vsyslog() once).
++ *
++ * Cases:
++ *   oline != NULL && nline != NULL  → changed entry
++ *   oline == NULL                   → added entry
++ *   nline == NULL                   → removed entry
++ *
++ * *out is heap-allocated by open_memstream; caller must free() it. */
++static void build_syslog_line(report_t *report, db_line *oline, db_line *nline,
++                              DB_ATTR_TYPE attrs, char **out) {
++    db_line *ref = nline ? nline : oline;
++    const char *type = get_syslog_type_prefix(ref->perm);
++
++    char *buf = NULL;
++    size_t bufsz = 0;
++    FILE *stream = open_memstream(&buf, &bufsz);
++
++    /* Write "type=path" prefix. */
++    if (type) {
++        fprintf(stream, "%s=%s", type, ref->filename);
++    } else {
++        fprintf(stream, "%s", ref->filename);
++    }
++
++    if (oline && nline) {
++        /* Changed entry: emit only differing attributes. */
++        for (int j = 0; j < report_attrs_order_length; j++) {
++            ATTRIBUTE a = report_attrs_order[j];
++
++            switch (a) {
++                case attr_allhashsums:
++                    /* Expand to each compiled-in hash, mirroring print_dbline_attrs(). */
++                    for (int i = 0; i < num_hashes; i++) {
++                        if (!(ATTR(hashsums[i].attribute) & attrs)) { continue; }
++                        const char *key = get_attr_key(hashsums[i].attribute);
++                        if (!key) { continue; }
++                        char **oval = NULL, **nval = NULL;
++                        get_attribute_values(ATTR(hashsums[i].attribute), oline, &oval, report);
++                        get_attribute_values(ATTR(hashsums[i].attribute), nline, &nval, report);
++                        fprintf(stream, ";%s_old=%s;%s_new=%s",
++                                key, oval ? oval[0] : "", key, nval ? nval[0] : "");
++                        if (oval) { free(oval[0]); free(oval); }
++                        if (nval) { free(nval[0]); free(nval); }
++                    }
++                    break;
++
++                case attr_size:
++                    /* attr_size and attr_sizeg share this slot in report_attrs_order. */
++                    if (ATTR(attr_size) & attrs) {
++                        const char *key = get_attr_key(attr_size);
++                        if (key) {
++                            char **oval = NULL, **nval = NULL;
++                            get_attribute_values(ATTR(attr_size), oline, &oval, report);
++                            get_attribute_values(ATTR(attr_size), nline, &nval, report);
++                            fprintf(stream, ";%s_old=%s;%s_new=%s",
++                                    key, oval ? oval[0] : "", key, nval ? nval[0] : "");
++                            if (oval) { free(oval[0]); free(oval); }
++                            if (nval) { free(nval[0]); free(nval); }
++                        }
++                    }
++                    if (ATTR(attr_sizeg) & attrs) {
++                        const char *key = get_attr_key(attr_sizeg); /* returns "Size" */
++                        if (key) {
++                            char **oval = NULL, **nval = NULL;
++                            get_attribute_values(ATTR(attr_sizeg), oline, &oval, report);
++                            get_attribute_values(ATTR(attr_sizeg), nline, &nval, report);
++                            fprintf(stream, ";%s_old=%s;%s_new=%s",
++                                    key, oval ? oval[0] : "", key, nval ? nval[0] : "");
++                            if (oval) { free(oval[0]); free(oval); }
++                            if (nval) { free(nval[0]); free(nval); }
++                        }
++                    }
++                    break;
++
++                default:
++                    if (!(ATTR(a) & attrs)) { break; }
++#ifdef WITH_XATTR
++                    if (a == attr_xattrs) {
++                        build_xattrs_compact(stream, oline, "old");
++                        build_xattrs_compact(stream, nline, "new");
++                        break;
++                    }
++#endif
++#ifdef WITH_POSIX_ACL
++                    if (a == attr_acl) {
++                        build_acl_compact(stream, oline, "old");
++                        build_acl_compact(stream, nline, "new");
++                        break;
++                    }
++#endif
++                    {
++                        const char *key = get_attr_key(a);
++                        if (!key) { break; }
++                        char **oval = NULL, **nval = NULL;
++                        get_attribute_values(ATTR(a), oline, &oval, report);
++                        get_attribute_values(ATTR(a), nline, &nval, report);
++                        fprintf(stream, ";%s_old=%s;%s_new=%s",
++                                key, oval ? oval[0] : "", key, nval ? nval[0] : "");
++                        if (oval) { free(oval[0]); free(oval); }
++                        if (nval) { free(nval[0]); free(nval); }
++                    }
++                    break;
++            }
++        }
++    } else if (!oline) {
++        fprintf(stream, "; added");
++    } else {
++        fprintf(stream, "; removed");
++    }
++
++    fclose(stream);
++    *out = buf;
++}
++
++/* Emits exactly one syslog line for a file event. */
++static void emit_syslog_entry(report_t *report, db_line *oline, db_line *nline,
++                              DB_ATTR_TYPE attrs) {
++    char *line = NULL;
++    build_syslog_line(report, oline, nline, attrs, &line);
++    report_printf(report, "%s\n", line);
++    free(line);
++}
++
++/* Unconditional tree walker — does not gate added/removed on report->level,
++ * matching the original patch's print_syslog_format() behavior. */
++static void syslog_walk_tree(report_t *report, seltree *node) {
++    pthread_rwlock_rdlock(&node->rwlock);
++
++    if (node->checked & NODE_CHANGED) {
++        emit_syslog_entry(report, node->old_data, node->new_data,
++                          get_report_attributes(node, report));
++    }
++    if (node->checked & NODE_ADDED) {
++        emit_syslog_entry(report, NULL, node->new_data,
++                          node->new_data->attr & ~report->ignore_added_attrs);
++    }
++    if (node->checked & NODE_REMOVED) {
++        emit_syslog_entry(report, node->old_data, NULL,
++                          node->old_data->attr & ~report->ignore_removed_attrs);
++    }
++
++    for (tree_node *x = tree_walk_first(node->children); x != NULL; x = tree_walk_next(x)) {
++        syslog_walk_tree(report, tree_get_data(x));
++    }
++
++    pthread_rwlock_unlock(&node->rwlock);
++}
++
++/* ── Module callbacks ─────────────────────────────────────────────────── */
++
++static void noop_header(report_t *report)                            { (void)report; }
++static void noop_footer(report_t *report)                            { (void)report; }
++static void noop_databases(report_t *report)                         { (void)report; }
++static void noop_config_options(report_t *report)                    { (void)report; }
++static void noop_report_options(report_t *report)                    { (void)report; }
++static void noop_starttime_version(report_t *r, const char *t, const char *v) { (void)r; (void)t; (void)v; }
++static void noop_endtime_runtime(report_t *r, const char *t, long rt)         { (void)r; (void)t; (void)rt; }
++static void noop_new_database_written(report_t *report)              { (void)report; }
++static void noop_entries(report_t *r, seltree *n, const int f)       { (void)r; (void)n; (void)f; }
++static void noop_diff_attrs(report_t *report)                        { (void)report; }
++static void noop_summary(report_t *report)                           { (void)report; }
++
++/* Emits header + summary when there are differences.  Two separate
++ * report_printf() calls — each becomes one syslog message. */
++static void syslog_outline(report_t *report) {
++    if (report->nadd || report->nrem || report->nchg) {
++        report_printf(report, "AIDE found differences between database and filesystem!!\n");
++        report_printf(report,
++                      "summary;total_number_of_files=%ld;added_files=%ld;"
++                      "removed_files=%ld;changed_files=%ld\n",
++                      report->ntotal, report->nadd, report->nrem, report->nchg);
++    }
++}
++
++static void syslog_details(report_t *report, seltree *node) {
++    syslog_walk_tree(report, node);
++}
++
++report_format_module report_module_syslog = {
++    .print_report_config_options     = noop_config_options,
++    .print_report_databases          = noop_databases,
++    .print_report_details            = syslog_details,
++    .print_report_diff_attrs_entries = noop_diff_attrs,
++    .print_report_endtime_runtime    = noop_endtime_runtime,
++    .print_report_entries            = noop_entries,
++    .print_report_footer             = noop_footer,
++    .print_report_header             = noop_header,
++    .print_report_new_database_written = noop_new_database_written,
++    .print_report_outline            = syslog_outline,
++    .print_report_report_options     = noop_report_options,
++    .print_report_starttime_version  = noop_starttime_version,
++    .print_report_summary            = noop_summary,
++};
+-- 
+2.54.0
+

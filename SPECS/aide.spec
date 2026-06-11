@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.19.2
-Release:        4%{?dist}
+Release:        4%{?dist}.1
 URL:            https://github.com/aide/aide
 License:        GPL-2.0-or-later
 Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
@@ -13,6 +13,8 @@ Source3:        aide.conf
 Source4:        README.quickstart
 Source5:        aide.logrotate
 Source6:        aide-tmpfiles.conf
+Source7:        aide-migrate-config
+Patch0:         aide-0.19.2-syslog-format.patch
 
 BuildRequires:  gcc
 BuildRequires:  make
@@ -64,12 +66,14 @@ mkdir -p %{buildroot}%{_localstatedir}/log/aide
 mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 # Install tmpfiles config
 install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/aide.conf
+install -Dpm0755 %{SOURCE7} %{buildroot}%{_sbindir}/aide-migrate-config
 
 %files
 %license COPYING
 %doc AUTHORS ChangeLog NEWS README
 %doc README.quickstart
 %{_sbindir}/aide
+%{_sbindir}/aide-migrate-config
 %{_mandir}/man1/*.1*
 %{_mandir}/man5/*.5*
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/aide.conf
@@ -78,7 +82,18 @@ install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/aide.conf
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 %{_tmpfilesdir}/aide.conf
 
+%post
+if [ $1 -ge 2 ]; then
+    /usr/sbin/aide-migrate-config /etc/aide.conf 2>&1 | \
+        tee -a /var/log/aide/aide-migrate.log || :
+fi
+
 %changelog
+* Tue May 26 2026 Attila Lakatos <alakatos@redhat.com> - 0.19.2-4.1
+- Re-add syslog_format config option dropped during rebase to 0.19.2
+Resolves: RHEL-178845
+- Add aide-migrate-config to automate config migration from pre-0.19 syntax
+
 * Wed Oct 15 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-4
 - Adjust default config to avoid false positives in /etc
 Resolves: RHEL-39970

@@ -1,0 +1,588 @@
+#!/bin/bash
+# aide-migrate-config -- migrate AIDE configuration files from pre-0.19 syntax
+#
+# Usage: aide-migrate-config [--dry-run] [--skip-init] <config-file>
+#
+#   --dry-run    Report what would change; do not modify any file.
+#   --skip-init  Migrate config files only; do not reinitialise the database.
+#   <config-file>  Path to the main AIDE config (e.g. /etc/aide.conf).
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+readonly SCRIPT="$(basename "$0")"
+readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+
+DRY_RUN=false
+SKIP_INIT=false
+REINIT_NEEDED=false
+# Parallel arrays: BACKUP_ORIG[i] → BACKUP_COPY[i]
+BACKUP_ORIG=()
+BACKUP_COPY=()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+usage() {
+    echo "Usage: $SCRIPT [--dry-run] [--skip-init] <config-file>" >&2
+    exit 1
+}
+
+die() {
+    echo "$SCRIPT: error: $*" >&2
+    exit 1
+}
+
+info() {
+    echo "$SCRIPT: $*" >&2
+}
+
+# log_action MESSAGE
+# Log a migration action. Prefixes with "would " in dry-run mode.
+log_action() {
+    if $DRY_RUN; then
+        info "  would $*"
+    else
+        info "  $*"
+    fi
+}
+
+# config_has FILE KEY
+# Return 0 if FILE contains a KEY= directive.
+config_has() {
+    local file="$1" key="$2"
+    grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$file"
+}
+
+# config_del FILE KEY
+# Delete all lines matching KEY= from FILE in-place.
+config_del() {
+    local file="$1" key="$2"
+    sed -E -i "/^[[:space:]]*${key}[[:space:]]*=/d" "$file"
+}
+
+# config_rename FILE OLD_KEY NEW_KEY
+# Rename OLD_KEY= to NEW_KEY= in FILE in-place.
+config_rename() {
+    local file="$1" old_key="$2" new_key="$3"
+    sed -E -i "s/^([[:space:]]*)${old_key}([[:space:]]*=)/\1${new_key}\2/" "$file"
+}
+
+# append_setting FILE CONTENT
+# Append "CONTENT\n" to FILE, guaranteeing it starts on a fresh line.
+# No-op if the key extracted from CONTENT already exists in FILE.
+append_setting() {
+    local file="$1" content="$2"
+    local key="${content%%=*}"
+    config_has "$file" "$key" && return 0
+    if [[ -s "$file" ]] && [[ "$(tail -c1 "$file" | wc -l)" -eq 0 ]]; then
+        printf '\n' >> "$file"
+    fi
+    printf '%s\n' "$content" >> "$file"
+}
+
+# backup_file FILE
+# Create a timestamped backup of FILE. No-op in dry-run mode.
+backup_file() {
+    local file="$1"
+    local backup="${file}.bak.${TIMESTAMP}"
+    if $DRY_RUN; then
+        return 0
+    fi
+    cp -p -- "$file" "$backup"
+    BACKUP_ORIG+=("$file")
+    BACKUP_COPY+=("$backup")
+    info "backup: $backup"
+}
+
+# restore_backups
+# Called by ERR trap; restores every backed-up file.
+restore_backups() {
+    local i
+    for i in "${!BACKUP_ORIG[@]}"; do
+        cp -p -- "${BACKUP_COPY[$i]}" "${BACKUP_ORIG[$i]}" && \
+            info "restored: ${BACKUP_ORIG[$i]}" || \
+            info "WARNING: could not restore ${BACKUP_ORIG[$i]} from ${BACKUP_COPY[$i]}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Include-file discovery
+# ---------------------------------------------------------------------------
+
+# extract_includes CONFIG_FILE
+# Print one absolute path per line for each file pulled in by @@include directives.
+extract_includes() {
+    local config="$1"
+    local dir
+    dir="$(dirname "$config")"
+
+    grep -E '^[[:space:]]*@@include[[:space:]]' "$config" 2>/dev/null | \
+    while IFS= read -r line; do
+        # Strip the @@include keyword
+        local args
+        args="${line#*@@include}"
+        args="${args#"${args%%[! ]*}"}"  # ltrim
+
+        # Count tokens to distinguish FILE vs DIRECTORY REGEX forms
+        local tok1 tok2
+        tok1="${args%% *}"
+        tok2="${args#* }"
+
+        if [[ "$tok1" == "$args" ]]; then
+            # Single token: @@include FILE
+            if [[ "$tok1" = /* ]]; then
+                echo "$tok1"
+            else
+                echo "${dir}/${tok1}"
+            fi
+        else
+            # Two tokens: @@include DIRECTORY REGEX
+            local incdir regex
+            incdir="$tok1"
+            regex="$tok2"
+            if [[ "$incdir" != /* ]]; then
+                incdir="${dir}/${incdir}"
+            fi
+            if [[ -d "$incdir" ]]; then
+                find "$incdir" -maxdepth 1 -type f -regex "$regex" | sort
+            fi
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Config file migration
+# ---------------------------------------------------------------------------
+
+# needs_migration FILE
+# Return 0 (true) if FILE contains any pattern requiring migration.
+needs_migration() {
+    local f="$1"
+    # Removed/renamed config options
+    local _key
+    for _key in database grouped summarize_changes ignore_list report_attributes verbose; do
+        config_has "$f" "$_key" && return 0
+    done
+    # sql: value starts with sql: (PostgreSQL backend removed)
+    grep -qE '^[[:space:]]*[a-z_]+[[:space:]]*=[[:space:]]*sql:' "$f" && return 0
+    # any h character in report_ignore_e2fsattrs value
+    grep -qE '^[[:space:]]*report_ignore_e2fsattrs[[:space:]]*=.*h' "$f" && return 0
+    # removed/deprecated hashsums; dash at end of character class to avoid range error in GNU sed
+    grep -v '^[[:space:]]*#' "$f" | \
+        grep -qE '[+[:space:]=-](crc32b|crc32|tiger|haval|whirlpool|md5|sha1|rmd160|gost)([+[:space:]-]|$)' && return 0
+    # standalone S attribute in an expression (skip comment lines)
+    grep -v '^[[:space:]]*#' "$f" | grep -qE '(^|[+=[:space:]-])S([+[:space:]-]|$)' && return 0
+    # deprecated preprocessor macros
+    grep -qE '^[[:space:]]*@@(ifdef|ifndef|ifhost|ifnhost)[[:space:]]' "$f" && return 0
+    # missing trailing newline
+    [[ -s "$f" ]] && [[ "$(tail -c1 "$f" | wc -l)" -eq 0 ]] && return 0
+    return 1
+}
+
+# remove_hashsum FILE HASHSUM
+# Remove a single hashsum token from all group/rule expressions in FILE (in-place).
+# Handles all positions: +hash, -hash, hash+ (first), and hash$ (last with minus prefix).
+remove_hashsum() {
+    local file="$1" hash="$2"
+
+    # Pass 1: remove hash when it is preceded by an operator (+ or -)
+    # Keep whatever follows (next operator, space, or end-of-line).
+    sed -E -i \
+        -e "/^[[:space:]]*#/!s/[+-]${hash}([+[:space:]-])/\1/g" \
+        -e "/^[[:space:]]*#/!s/[+-]${hash}$//" \
+        "$file"
+
+    # Pass 2: remove hash at the start of an expression (after = or whitespace),
+    # not preceded by an operator (those were handled in pass 1).
+    sed -E -i \
+        -e "/^[[:space:]]*#/!s/(=[[:space:]]*)${hash}([+[:space:]-])/\1\2/g" \
+        -e "/^[[:space:]]*#/!s/(=[[:space:]]*)${hash}$/\1/" \
+        -e "/^[[:space:]]*#/!s/([[:space:]])${hash}([+[:space:]-])/\1\2/g" \
+        -e "/^[[:space:]]*#/!s/([[:space:]])${hash}$/\1/" \
+        "$file"
+
+    # Clean up artifacts: double operators, dangling operator after '=', trailing operator.
+    sed -E -i \
+        -e '/^[[:space:]]*#/!s/[+][+]/+/g' \
+        -e '/^[[:space:]]*#/!s/[+][-]/+/g' \
+        -e '/^[[:space:]]*#/!s/[-][+]/-/g' \
+        -e '/^[[:space:]]*#/!s/(=[[:space:]]*)[+-]/\1/g' \
+        -e '/^[[:space:]]*#/!s/[+-]$//' \
+        "$file"
+}
+
+# migrate_config_file FILE
+# Apply all config transformations to FILE. Sets global REINIT_NEEDED when needed.
+migrate_config_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        info "WARNING: $file not found, skipping"
+        return 0
+    fi
+    if [[ ! -r "$file" ]]; then
+        info "WARNING: $file is not readable, skipping"
+        return 0
+    fi
+
+    if ! needs_migration "$file"; then
+        info "no migration needed: $file"
+        return 0
+    fi
+
+    info "migrating: $file"
+    backup_file "$file"
+
+    local tmpfile
+    tmpfile="$(mktemp "${file}.XXXXXX")"
+    # Ensure tmpfile is cleaned up if we exit abnormally before the final mv
+    trap "rm -f '$tmpfile'; restore_backups" ERR
+    cp -p -- "$file" "$tmpfile"
+
+    # -----------------------------------------------------------------------
+    # Rename removed config options
+    # The 'database' key anchors to KEY= so it cannot match 'database_in'/'database_out'.
+    # -----------------------------------------------------------------------
+    config_has "$tmpfile" database          && log_action "rename: database= → database_in="
+    config_has "$tmpfile" grouped           && log_action "rename: grouped= → report_grouped="
+    config_has "$tmpfile" summarize_changes && log_action "rename: summarize_changes= → report_summarize_changes="
+    config_has "$tmpfile" ignore_list       && log_action "rename: ignore_list= → report_ignore_changed_attrs="
+    config_has "$tmpfile" report_attributes && log_action "rename: report_attributes= → report_force_attrs="
+    if ! $DRY_RUN; then
+        config_rename "$tmpfile" database          database_in
+        config_rename "$tmpfile" grouped           report_grouped
+        config_rename "$tmpfile" summarize_changes report_summarize_changes
+        config_rename "$tmpfile" ignore_list       report_ignore_changed_attrs
+        config_rename "$tmpfile" report_attributes report_force_attrs
+    fi
+
+    # -----------------------------------------------------------------------
+    # Replace verbose= with the equivalent 0.19 options
+    # -----------------------------------------------------------------------
+    if config_has "$tmpfile" verbose; then
+        log_action "remove verbose="
+        config_has "$tmpfile" log_level    || log_action "add log_level=warning"
+        config_has "$tmpfile" report_level || log_action "add report_level=changed_attributes"
+        if ! $DRY_RUN; then
+            config_del "$tmpfile" verbose
+            append_setting "$tmpfile" 'log_level=warning'
+            append_setting "$tmpfile" 'report_level=changed_attributes'
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Remove sql: database URL lines (PostgreSQL backend removed)
+    # Match lines whose value (after =) begins with sql:.
+    # -----------------------------------------------------------------------
+    if grep -qE '^[[:space:]]*[a-z_]+[[:space:]]*=[[:space:]]*sql:' "$tmpfile"; then
+        log_action "remove sql: database URL lines"
+        if $DRY_RUN; then
+            # Check which keys survive after sql: removal (i.e. have at least one non-sql: value)
+            grep -E '^[[:space:]]*database_out[[:space:]]*=' "$tmpfile" | \
+                grep -qvE '^[[:space:]]*[a-z_]+[[:space:]]*=[[:space:]]*sql:' || \
+                info "  would add default database_out=file:/var/lib/aide/aide.db.new.gz"
+            grep -E '^[[:space:]]*database_in[[:space:]]*=' "$tmpfile" | \
+                grep -qvE '^[[:space:]]*[a-z_]+[[:space:]]*=[[:space:]]*sql:' || \
+                info "  would add default database_in=file:/var/lib/aide/aide.db.gz"
+        fi
+        if ! $DRY_RUN; then
+            sed -E -i '/^[[:space:]]*[a-z_]+[[:space:]]*=[[:space:]]*sql:/d' "$tmpfile"
+            config_has "$tmpfile" database_out || {
+                append_setting "$tmpfile" 'database_out=file:/var/lib/aide/aide.db.new.gz'
+                info "  WARNING: sql: URL removed; default database_out added." \
+                     "Verify storage path before running aide --init."
+            }
+            config_has "$tmpfile" database_in || {
+                append_setting "$tmpfile" 'database_in=file:/var/lib/aide/aide.db.gz'
+                info "  WARNING: sql: database_in removed; default database_in added." \
+                     "Verify path before running aide --init."
+            }
+        fi
+        REINIT_NEEDED=true
+    fi
+
+    # -----------------------------------------------------------------------
+    # Remove 'h' from report_ignore_e2fsattrs
+    # Use the sed address form to remove ALL 'h' characters from the value line.
+    # -----------------------------------------------------------------------
+    if grep -qE '^[[:space:]]*report_ignore_e2fsattrs[[:space:]]*=.*h' "$tmpfile"; then
+        log_action "remove 'h' from report_ignore_e2fsattrs"
+        if ! $DRY_RUN; then
+            sed -E -i '/^[[:space:]]*report_ignore_e2fsattrs[[:space:]]*=/s/h//g' "$tmpfile"
+            sed -E -i '/^[[:space:]]*report_ignore_e2fsattrs[[:space:]]*=[[:space:]]*$/d' "$tmpfile"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Remove deprecated and removed hashsums
+    # Process crc32b before crc32 to avoid prefix collision.
+    # Character classes use dash at end to prevent GNU sed range-error.
+    # -----------------------------------------------------------------------
+    local hash changed_hashes=false
+    for hash in crc32b crc32 tiger haval whirlpool md5 sha1 rmd160 gost; do
+        if grep -v '^[[:space:]]*#' "$tmpfile" | grep -qE "(^|[+[:space:]=-])${hash}([+[:space:]-]|\$)"; then
+            log_action "remove hashsum: $hash"
+            if ! $DRY_RUN; then
+                remove_hashsum "$tmpfile" "$hash"
+            fi
+            changed_hashes=true
+            REINIT_NEEDED=true
+        fi
+    done
+
+    # Post-removal: fill any group definition whose RHS became empty with sha256
+    if $changed_hashes; then
+        if ! $DRY_RUN; then
+            while IFS= read -r lineno; do
+                [[ -z "$lineno" ]] && continue
+                sed -i "${lineno}s/=.*/= sha256/" "$tmpfile"
+                info "  group on line $lineno became empty after hashsum removal; added sha256"
+            done < <(grep -nE '^[A-Za-z0-9]+[[:space:]]*=[[:space:]]*[+-]?[[:space:]]*$' \
+                        "$tmpfile" | cut -d: -f1)
+        else
+            info "  note: any group containing only deprecated hashsums will have sha256 substituted"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Replace deprecated S attribute with growing+s
+    # Applies since AIDE 0.16 is being replaced; growing+s is unknown to 0.16.
+    # Character classes use dash at end to prevent GNU sed range-error.
+    # -----------------------------------------------------------------------
+    if grep -qE '(^|[+=[:space:]-])S([+[:space:]-]|$)' "$tmpfile"; then
+        log_action "replace S attribute with growing+s"
+        if ! $DRY_RUN; then
+            sed -E -i \
+                -e '/^[[:space:]]*#/!s/([+=[:space:]-])S([+[:space:]-]|$)/\1growing+s\2/g' \
+                -e '/^[[:space:]]*#/!s/^S([+[:space:]-]|$)/growing+s\1/g' \
+                "$tmpfile"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Replace deprecated @@ifdef/@@ifndef/@@ifhost/@@ifnhost macros
+    # -----------------------------------------------------------------------
+    if grep -qE '^[[:space:]]*@@(ifdef|ifndef|ifhost|ifnhost)[[:space:]]' "$tmpfile"; then
+        log_action "replace deprecated @@ifdef/@@ifndef/@@ifhost/@@ifnhost macros"
+        if ! $DRY_RUN; then
+            sed -E -i \
+                -e 's/^([[:space:]]*)@@ifdef([[:space:]])/\1@@if defined\2/g' \
+                -e 's/^([[:space:]]*)@@ifndef([[:space:]])/\1@@if not defined\2/g' \
+                -e 's/^([[:space:]]*)@@ifhost([[:space:]])/\1@@if hostname\2/g' \
+                -e 's/^([[:space:]]*)@@ifnhost([[:space:]])/\1@@if not hostname\2/g' \
+                "$tmpfile"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Ensure file ends with a newline
+    # -----------------------------------------------------------------------
+    local last_byte
+    last_byte="$(tail -c1 "$tmpfile" | od -An -tx1 | tr -d ' \n')"
+    if [[ -n "$last_byte" && "$last_byte" != '0a' ]]; then
+        log_action "add missing trailing newline"
+        $DRY_RUN || echo "" >> "$tmpfile"
+    fi
+
+    # H group's content changed in 0.19; warn if used without a custom definition.
+    # Only reached when the file had real 0.16-style options, so this never fires on a
+    # clean 0.19 config.
+    if grep -qE '(^|[+[:space:]-])H([+[:space:]-]|$)' "$tmpfile" 2>/dev/null; then
+        if ! grep -qE '^[[:space:]]*H[[:space:]]*=' "$tmpfile"; then
+            info "NOTE: built-in H group in use without custom definition;" \
+                 "H content changed in 0.19 — run 'aide --init' to rebuild the database"
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # Commit changes
+    # -----------------------------------------------------------------------
+    if ! $DRY_RUN; then
+        mv -- "$tmpfile" "$file"
+        # Restore original permissions
+        chmod --reference="${BACKUP_COPY[-1]}" "$file" 2>/dev/null || true
+    else
+        rm -f "$tmpfile"
+    fi
+
+    # Disarm the local ERR trap and re-arm the global one
+    trap - ERR
+    trap restore_backups ERR
+}
+
+# ---------------------------------------------------------------------------
+# Post-migration warnings
+# ---------------------------------------------------------------------------
+check_and_warn() {
+    local file="$1"
+
+    # Warn if a rule path starts with a macro variable.
+    # Only flag lines where @@{...} appears at the very start (after optional whitespace);
+    # mid-path macros like /path/@@{VAR}/sub are valid and must not be flagged.
+    local macro_rules
+    macro_rules="$(grep -nE '^[[:space:]]*@@\{[^}]+\}' "$file" 2>/dev/null || true)"
+    if [[ -n "$macro_rules" ]]; then
+        info "WARNING ($file): the following rule paths start with a macro variable." \
+             "Rewrite them so the path begins with a literal '/':"
+        echo "$macro_rules" >&2
+    fi
+
+    # Warn if a group name contains non-alphanumeric characters.
+    # Require an uppercase first letter to avoid false positives on config option names.
+    # Underscores are accepted by AIDE 0.19.2; only '-' and '.' cause parse errors.
+    local bad_groups
+    bad_groups="$(grep -nE '^[A-Z][A-Za-z0-9]*[-.][A-Za-z0-9][^=]*[[:space:]]*=' \
+                    "$file" 2>/dev/null || true)"
+    if [[ -n "$bad_groups" ]]; then
+        info "WARNING ($file): the following group names contain non-alphanumeric characters." \
+             "Rename groups and all their references to [A-Za-z0-9] only:"
+        echo "$bad_groups" >&2
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Database reinitialisation
+# ---------------------------------------------------------------------------
+
+# expand_aide_macros CONFIG VALUE
+# Expand @@{NAME} references in VALUE using @@define lines from CONFIG.
+expand_aide_macros() {
+    local config="$1" value="$2"
+    local key val
+    while IFS= read -r defline; do
+        key="$(echo "$defline" | awk '{print $2}')"
+        val="$(echo "$defline" | awk '{$1=$2=""; print substr($0,3)}')"
+        value="${value//@@\{${key}\}/$val}"
+    done < <(grep -E '^[[:space:]]*@@define[[:space:]]' "$config" || true)
+    echo "$value"
+}
+
+# reinit_database CONFIG_FILE
+# Backup the existing database, run aide --init, move the new DB into place.
+reinit_database() {
+    local config="$1"
+
+    # Parse database_in path (file: URLs only)
+    local raw_in
+    raw_in="$(grep -E '^[[:space:]]*database_in[[:space:]]*=' "$config" | \
+              head -1 | sed -E 's/^[^=]+=file://')" || true
+    [[ -z "$raw_in" ]] && { info "WARNING: database_in not found in config; skipping reinit"; return 0; }
+    local db_in
+    db_in="$(expand_aide_macros "$config" "$raw_in")"
+
+    # Parse database_out path (file: URLs only)
+    local raw_out
+    raw_out="$(grep -E '^[[:space:]]*database_out[[:space:]]*=' "$config" | \
+               head -1 | sed -E 's/^[^=]+=file://')" || true
+    [[ -z "$raw_out" ]] && { info "WARNING: database_out not found in config; skipping reinit"; return 0; }
+    local db_out
+    db_out="$(expand_aide_macros "$config" "$raw_out")"
+
+    if [[ ! -f "$db_in" ]]; then
+        info "no existing database at $db_in; run 'aide --init -c $config' when ready"
+        return 0
+    fi
+
+    info "reinitialising database (this may take several minutes)..."
+    backup_file "$db_in"
+    aide --init -c "$config"
+    if [[ ! -f "$db_out" ]]; then
+        die "aide --init completed but output database not found at $db_out"
+    fi
+    mv -- "$db_out" "$db_in"
+    chmod 0600 "$db_in"
+    chown root:root "$db_in"
+    info "database reinitialised: $db_in"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    # CLI flags are out of scope for this script
+    info "Note: This script migrates aide config files only." \
+         "If you use '--verbose' or '--report' flags in wrapper scripts," \
+         "cron jobs, or systemd units, remove those flags manually."
+
+    # Argument parsing
+    local config_file=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)   DRY_RUN=true; shift ;;
+            --skip-init) SKIP_INIT=true; shift ;;
+            -h|--help)   usage ;;
+            --)          shift; break ;;
+            -*)          die "unknown option: $1" ;;
+            *)           config_file="$1"; shift ;;
+        esac
+    done
+    [[ $# -gt 0 ]] && die "unexpected argument: $1"
+    [[ -z "$config_file" ]] && usage
+    [[ -f "$config_file" ]] || die "config file not found: $config_file"
+    [[ -r "$config_file" ]] || die "config file not readable: $config_file"
+    $DRY_RUN || [[ -w "$config_file" ]] || die "config file not writable: $config_file"
+
+    # Verify aide >= 0.19 is installed
+    local aide_ver
+    aide_ver="$(aide --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)" || true
+    if [[ -z "$aide_ver" ]]; then
+        info "aide not found; skipping migration"
+        exit 0
+    fi
+    local aide_major aide_minor
+    aide_major="${aide_ver%%.*}"
+    aide_minor="${aide_ver#*.}"
+    if [[ "$aide_major" -lt 1 && "$aide_minor" -lt 19 ]]; then
+        info "aide $aide_ver < 0.19; skipping migration"
+        exit 0
+    fi
+
+    $DRY_RUN && info "DRY-RUN mode: no files will be modified"
+
+    # Global ERR trap for cleanup
+    trap restore_backups ERR
+
+    # Collect all config files to process
+    local -a config_files=("$config_file")
+    while IFS= read -r inc; do
+        [[ -f "$inc" ]] && config_files+=("$inc")
+    done < <(extract_includes "$config_file")
+
+    # Migrate each config file
+    local f
+    for f in "${config_files[@]}"; do
+        migrate_config_file "$f"
+    done
+
+    # Post-migration warnings
+    for f in "${config_files[@]}"; do
+        check_and_warn "$f"
+    done
+
+    # Validate the resulting config
+    if ! $DRY_RUN; then
+        if ! aide --config-check -c "$config_file" >/dev/null 2>&1; then
+            info "ERROR: aide --config-check failed after migration; restoring all backups"
+            restore_backups
+            exit 1
+        fi
+        info "aide --config-check passed"
+    fi
+
+    # Database reinit
+    if $REINIT_NEEDED && ! $SKIP_INIT && ! $DRY_RUN; then
+        reinit_database "$config_file"
+    elif $REINIT_NEEDED && $SKIP_INIT && ! $DRY_RUN; then
+        info "database reinitialisation required but --skip-init set;" \
+             "run 'aide --init -c $config_file' manually"
+    elif $REINIT_NEEDED && $DRY_RUN; then
+        info "would require database reinitialisation after migration"
+    fi
+
+    info "migration complete"
+}
+
+main "$@"
