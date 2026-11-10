@@ -1,7 +1,7 @@
 Summary:        Intrusion detection environment
 Name:           aide
 Version:        0.19.2
-Release:        5%{?dist}.1
+Release:        7%{?dist}
 URL:            https://github.com/aide/aide
 License:        GPLv2+
 
@@ -16,7 +16,10 @@ Source4:        README.quickstart
 Source5:        aide.logrotate
 Source6:        aide-tmpfiles.conf
 Source7:        aide-migrate-config
+Source8:        aide-check.service
+Source9:        aide-check.timer
 Patch0:         aide-0.19.2-syslog-format.patch
+Patch1:         aide-include-permission-checks.patch
 
 BuildRequires:  gcc
 BuildRequires:  make
@@ -69,6 +72,11 @@ mkdir -p -m0700 %{buildroot}%{_localstatedir}/lib/aide
 # Install tmpfiles config
 install -Dpm0644 %{SOURCE6} %{buildroot}%{_tmpfilesdir}/aide.conf
 install -Dpm0755 %{SOURCE7} %{buildroot}%{_sbindir}/aide-migrate-config
+# Create /etc/aide.d/
+mkdir -p -m0700 %{buildroot}%{_sysconfdir}/aide.d
+# Install systemd timer and service for scheduled integrity checks
+install -Dpm0644 %{SOURCE8} %{buildroot}%{_unitdir}/aide-check.service
+install -Dpm0644 %{SOURCE9} %{buildroot}%{_unitdir}/aide-check.timer
 
 %files
 %license COPYING
@@ -80,21 +88,39 @@ install -Dpm0755 %{SOURCE7} %{buildroot}%{_sbindir}/aide-migrate-config
 %{_mandir}/man5/*.5*
 %config(noreplace) %attr(0600,root,root) %{_sysconfdir}/aide.conf
 %config(noreplace) %{_sysconfdir}/logrotate.d/aide
+%dir %attr(0700,root,root) %{_sysconfdir}/aide.d
 %dir %attr(0700,root,root) %{_localstatedir}/lib/aide
 %dir %attr(0700,root,root) %{_localstatedir}/log/aide
 %{_tmpfilesdir}/aide.conf
+%{_unitdir}/aide-check.service
+%{_unitdir}/aide-check.timer
 
 %post
+%systemd_post aide-check.timer
 if [ $1 -ge 2 ]; then
     /usr/sbin/aide-migrate-config /etc/aide.conf 2>&1 | \
         tee -a /var/log/aide/aide-migrate.log || :
 fi
 
+%preun
+%systemd_preun aide-check.timer
+
+%postun
+%systemd_postun_with_restart aide-check.timer
+
 %changelog
-* Tue May 26 2026 Attila Lakatos <alakatos@redhat.com> - 0.19.2-5.1
-- Re-add syslog_format config option dropped during rebase to 0.19.2
-Resolves: RHEL-178539
+* Tue Jun 03 2026 Patrik Koncity <pkoncity@redhat.com> - 0.19.2-7
+- Support for included files in /etc/aide.d/
+Resolves: RHEL-178122
+- Increase default values for num_workers
+Resolves: RHEL-178123
+- Add pre-configured systemd timer for aide check
+Resolves: RHEL-178121
+
+* Tue May 26 2026 Attila Lakatos <alakatos@redhat.com> - 0.19.2-6
 - Add aide-migrate-config to automate config migration from pre-0.19 syntax
+Resolves: RHEL-178317
+- Re-add syslog_format config option dropped during rebase to 0.19.2
 
 * Wed Oct 15 2025 Attila Lakatos <alakatos@redhat.com> - 0.19.2-5
 - Adjust default config to avoid false positives in /etc

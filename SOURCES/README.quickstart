@@ -20,21 +20,28 @@
    compared with the AIDE database. Prior to running a check manually,
    ensure that the AIDE binary and database have not been modified
    without your knowledge.
-   
-   Caution! 
-   
-   With the default setup, an AIDE check is not run periodically as a
-   cron job. It cannot be guaranteed that the AIDE binaries, config
-   file and database are intact. It is not recommended that you run
-   automated AIDE checks without verifying AIDE yourself frequently.
-   In addition to that, AIDE does not implement any password or
-   encryption protection for its own files.
-   
-   It is up to you how to put a file integrity checker to good effect
-   and how to set up automated checks if you think it adds a level of
-   safety (e.g. detecting failed/incomplete compromises or unauthorized
-   modification of special files). On a compromised system, the
-   intruder could disable the automated check. Or he could replace the
-   AIDE binary, config file and database easily when they are not
-   located on read-only media. 
+
+6) To schedule daily integrity checks, enable the systemd timer:
+
+   systemctl enable --now aide-check.timer
+
+   View results with: journalctl -u aide-check
+   Check timer status with: systemctl status aide-check.timer
+
+   The timer runs daily with low CPU/IO priority to minimize impact
+   on production workloads. It is disabled by default — only enable
+   it after initializing the database (steps 2-4).
+
+   Caution!
+
+   It cannot be guaranteed that the AIDE binaries, config file and
+   database are intact. It is not recommended that you run automated
+   AIDE checks without verifying AIDE yourself frequently. In addition
+   to that, AIDE does not implement any password or encryption
+   protection for its own files.
+
+   It is up to you how to put a file integrity checker to good effect.
+   On a compromised system, the intruder could disable the automated
+   check. Or he could replace the AIDE binary, config file and database
+   easily when they are not located on read-only media.
 
